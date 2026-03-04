@@ -1,7 +1,12 @@
 #!/bin/bash
-# mac-security-audit.sh — Security audit for macOS systems
-# Run: chmod +x mac-security-audit.sh && ./mac-security-audit.sh
-# Use sudo for full audit: sudo ./mac-security-audit.sh
+# mac-security-audit.sh — Security audit & hardening for macOS AI workstations
+# Designed for Mac Minis running OpenClaw, Ollama, and other AI agents
+#
+# Usage:
+#   ./mac-security-audit.sh          # Audit only
+#   ./mac-security-audit.sh --fix    # Audit + fix what can be auto-fixed
+#   sudo ./mac-security-audit.sh     # Full audit (includes firewall, sharing)
+#   sudo ./mac-security-audit.sh --fix  # Full audit + fix everything
 
 set -euo pipefail
 
@@ -10,16 +15,39 @@ YELLOW='\033[1;33m'
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
+DIM='\033[2m'
 NC='\033[0m'
+
+FIX_MODE=false
+[[ "${1:-}" == "--fix" ]] && FIX_MODE=true
 
 warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 ok()    { echo -e "${GREEN}[ OK ]${NC} $1"; }
 info()  { echo -e "${CYAN}[INFO]${NC} $1"; }
 alert() { echo -e "${RED}[ALERT]${NC} $1"; }
+fixed() { echo -e "${GREEN}[FIXED]${NC} $1"; }
 header(){ echo -e "\n${BOLD}═══ $1 ═══${NC}"; }
 
 ISSUES=0
+FIXED=0
 issue() { alert "$1"; ((ISSUES++)); }
+
+banner() {
+    echo -e "${BOLD}"
+    echo "  ┌─────────────────────────────────────────┐"
+    echo "  │       mac-security-audit v1.1.0          │"
+    echo "  │   Security audit for macOS AI stations   │"
+    echo "  └─────────────────────────────────────────┘"
+    echo -e "${NC}"
+    if $FIX_MODE; then
+        echo -e "  ${GREEN}Mode: AUDIT + FIX${NC}"
+    else
+        echo -e "  ${CYAN}Mode: AUDIT ONLY${NC} ${DIM}(use --fix to auto-fix issues)${NC}"
+    fi
+    echo ""
+}
+
+banner
 
 # ─── System Info ───
 header "System Info"
@@ -36,7 +64,14 @@ if [[ $EUID -eq 0 ]]; then
     if echo "$FW_STATE" | grep -q "enabled"; then
         ok "Firewall is enabled"
     else
-        issue "Firewall is DISABLED — enable in System Settings > Network > Firewall"
+        issue "Firewall is DISABLED"
+        if $FIX_MODE; then
+            /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate on >/dev/null 2>&1
+            fixed "Firewall enabled"
+            ((FIXED++))
+        else
+            echo -e "  ${DIM}Fix: sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate on${NC}"
+        fi
     fi
 
     STEALTH=$(/usr/libexec/ApplicationFirewall/socketfilterfw --getstealthmode 2>/dev/null)
@@ -44,9 +79,16 @@ if [[ $EUID -eq 0 ]]; then
         ok "Stealth mode is enabled"
     else
         warn "Stealth mode is disabled (machine responds to pings)"
+        if $FIX_MODE; then
+            /usr/libexec/ApplicationFirewall/socketfilterfw --setstealthmode on >/dev/null 2>&1
+            fixed "Stealth mode enabled"
+            ((FIXED++))
+        else
+            echo -e "  ${DIM}Fix: sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setstealthmode on${NC}"
+        fi
     fi
 else
-    warn "Run with sudo to check firewall status"
+    warn "Run with sudo to check/fix firewall status"
 fi
 
 # ─── FileVault ───
@@ -56,6 +98,7 @@ if echo "$FV_STATUS" | grep -q "On"; then
     ok "FileVault is ON"
 else
     issue "FileVault is OFF — your disk is not encrypted"
+    echo -e "  ${DIM}Fix: System Settings > Privacy & Security > FileVault > Turn On${NC}"
 fi
 
 # ─── SIP (System Integrity Protection) ───
@@ -64,7 +107,7 @@ SIP_STATUS=$(csrutil status 2>/dev/null || echo "unknown")
 if echo "$SIP_STATUS" | grep -q "enabled"; then
     ok "SIP is enabled"
 else
-    issue "SIP is DISABLED — re-enable from Recovery Mode"
+    issue "SIP is DISABLED — re-enable from Recovery Mode: csrutil enable"
 fi
 
 # ─── Gatekeeper ───
@@ -74,35 +117,227 @@ if echo "$GK_STATUS" | grep -q "enabled"; then
     ok "Gatekeeper is enabled"
 else
     issue "Gatekeeper is DISABLED"
+    if $FIX_MODE && [[ $EUID -eq 0 ]]; then
+        spctl --master-enable 2>/dev/null
+        fixed "Gatekeeper enabled"
+        ((FIXED++))
+    else
+        echo -e "  ${DIM}Fix: sudo spctl --master-enable${NC}"
+    fi
 fi
 
 # ─── Remote Access ───
 header "Remote Access Services"
-check_sharing() {
-    local service="$1"
-    local label="$2"
-    if [[ $EUID -eq 0 ]]; then
-        if launchctl list 2>/dev/null | grep -q "$service"; then
-            issue "$label is ENABLED"
-        else
-            ok "$label is disabled"
-        fi
-    fi
-}
-
 # SSH
 if systemsetup -getremotelogin 2>/dev/null | grep -qi "on"; then
     issue "Remote Login (SSH) is ENABLED"
+    if $FIX_MODE && [[ $EUID -eq 0 ]]; then
+        systemsetup -setremotelogin off 2>/dev/null
+        fixed "Remote Login (SSH) disabled"
+        ((FIXED++))
+    else
+        echo -e "  ${DIM}Fix: sudo systemsetup -setremotelogin off${NC}"
+    fi
 else
     ok "Remote Login (SSH) is disabled"
 fi
 
-# Screen Sharing / VNC
+# Screen Sharing
 if [[ $EUID -eq 0 ]]; then
-    check_sharing "com.apple.screensharing" "Screen Sharing"
-    check_sharing "com.apple.RemoteDesktop" "Remote Desktop (ARD)"
+    if launchctl list 2>/dev/null | grep -q "com.apple.screensharing"; then
+        issue "Screen Sharing is ENABLED"
+        if $FIX_MODE; then
+            launchctl disable system/com.apple.screensharing 2>/dev/null
+            launchctl bootout system/com.apple.screensharing 2>/dev/null || true
+            fixed "Screen Sharing disabled"
+            ((FIXED++))
+        else
+            echo -e "  ${DIM}Fix: System Settings > General > Sharing > Screen Sharing > Off${NC}"
+        fi
+    else
+        ok "Screen Sharing is disabled"
+    fi
+
+    # Remote Desktop (ARD)
+    ARD_RUNNING=false
+    if ps aux 2>/dev/null | grep -q "[A]RDAgent"; then
+        ARD_RUNNING=true
+    elif [[ -f "/Library/Application Support/Apple/Remote Desktop/RemoteManagement.launchd" ]]; then
+        ARD_RUNNING=true
+    elif defaults read /Library/Preferences/com.apple.RemoteManagement.plist 2>/dev/null | grep -q "ARD_AllLocalUsers = 1"; then
+        ARD_RUNNING=true
+    fi
+
+    if $ARD_RUNNING; then
+        issue "Remote Desktop (ARD) is ENABLED"
+        if $FIX_MODE; then
+            /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -deactivate -stop </dev/null >/dev/null 2>&1 || true
+            fixed "Remote Desktop (ARD) deactivated"
+            ((FIXED++))
+        else
+            echo -e "  ${DIM}Fix: sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -deactivate -stop${NC}"
+        fi
+    else
+        ok "Remote Desktop (ARD) is disabled"
+    fi
 else
     warn "Run with sudo to check sharing services"
+fi
+
+# ─── OpenClaw / AI Agent Services ───
+header "AI Agent Services"
+
+# Check for OpenClaw
+OPENCLAW_PLIST="$HOME/Library/LaunchAgents/ai.openclaw.gateway.plist"
+OPENCLAW_RUNNING=false
+OPENCLAW_CONFIG="$HOME/.openclaw/openclaw.json"
+
+if ps aux | grep -i "openclaw" | grep -v grep >/dev/null 2>&1; then
+    OPENCLAW_RUNNING=true
+    OPENCLAW_PID=$(ps aux | grep -i "openclaw-gateway" | grep -v grep | awk '{print $2}' | head -1)
+    OPENCLAW_MEM=$(ps aux | grep -i "openclaw-gateway" | grep -v grep | awk '{print $4}' | head -1)
+    info "OpenClaw gateway is RUNNING (PID $OPENCLAW_PID, ${OPENCLAW_MEM}% RAM)"
+fi
+
+if [[ -f "$OPENCLAW_PLIST" ]]; then
+    warn "OpenClaw LaunchAgent installed: $OPENCLAW_PLIST"
+
+    # Check KeepAlive
+    if defaults read "$OPENCLAW_PLIST" KeepAlive 2>/dev/null | grep -q "1"; then
+        warn "  KeepAlive=true (auto-restarts if killed)"
+    fi
+
+    # Check binding
+    if grep -q "0.0.0.0" "$OPENCLAW_PLIST" 2>/dev/null; then
+        issue "  OpenClaw gateway bound to 0.0.0.0 (all interfaces) — should be loopback"
+    fi
+fi
+
+# Check OpenClaw config for weak auth
+if [[ -f "$OPENCLAW_CONFIG" ]]; then
+    if grep -q '"token"' "$OPENCLAW_CONFIG" 2>/dev/null; then
+        TOKEN=$(grep '"token"' "$OPENCLAW_CONFIG" | head -1 | sed 's/.*: *"\([^"]*\)".*/\1/')
+        TOKEN_LEN=${#TOKEN}
+        if [[ $TOKEN_LEN -lt 16 ]]; then
+            issue "OpenClaw gateway token is weak ($TOKEN_LEN chars) — use a strong secret"
+            echo -e "  ${DIM}Fix: Change token in $OPENCLAW_CONFIG to a random 32+ char string${NC}"
+        else
+            ok "OpenClaw gateway token length is adequate ($TOKEN_LEN chars)"
+        fi
+    fi
+
+    # Check binding mode
+    if grep -q '"bind"' "$OPENCLAW_CONFIG" 2>/dev/null; then
+        BIND_MODE=$(grep '"bind"' "$OPENCLAW_CONFIG" | head -1 | sed 's/.*: *"\([^"]*\)".*/\1/')
+        if [[ "$BIND_MODE" == "loopback" ]]; then
+            ok "OpenClaw gateway bound to loopback only"
+        else
+            issue "OpenClaw gateway bind mode: $BIND_MODE — should be 'loopback'"
+        fi
+    fi
+
+    # Check for unvetted plugins
+    if grep -q '"enabled": true' "$OPENCLAW_CONFIG" 2>/dev/null; then
+        PLUGIN_COUNT=$(grep -c '"enabled": true' "$OPENCLAW_CONFIG" 2>/dev/null || echo "0")
+        if [[ $PLUGIN_COUNT -gt 0 ]]; then
+            warn "OpenClaw has $PLUGIN_COUNT enabled plugin(s) — verify plugins.allow is set"
+        fi
+    fi
+fi
+
+# Check for orphaned agent configs with secrets
+for AGENT_DIR in "$HOME/.zeroclaw" "$HOME/.picoclaw" "$HOME/.openinterpreter"; do
+    AGENT_NAME=$(basename "$AGENT_DIR" | sed 's/^\.//')
+    if [[ -d "$AGENT_DIR" ]]; then
+        HAS_SECRETS=false
+        SECRET_FILES=$(find "$AGENT_DIR" -maxdepth 1 \( -name "*secret*" -o -name "*key*" -o -name "*token*" -o -name "*otp*" \) 2>/dev/null || true)
+        if [[ -n "$SECRET_FILES" ]]; then
+            HAS_SECRETS=true
+            issue "$AGENT_NAME has secret files on disk:"
+            echo "$SECRET_FILES" | sed 's/^/  /'
+        fi
+        # Check config files for embedded secrets
+        for cfg in "$AGENT_DIR"/*.toml "$AGENT_DIR"/*.json "$AGENT_DIR"/*.yaml "$AGENT_DIR"/*.yml; do
+            if [[ -f "$cfg" ]] && grep -qiE "api_key|secret|token|password" "$cfg" 2>/dev/null; then
+                HAS_SECRETS=true
+                issue "$AGENT_NAME config contains secrets: $cfg"
+            fi
+        done
+        if ! $HAS_SECRETS; then
+            info "$AGENT_NAME directory found: $AGENT_DIR (no secrets detected)"
+        else
+            echo -e "  ${DIM}Fix: rm -rf $AGENT_DIR (if agent is no longer in use)${NC}"
+        fi
+    fi
+done
+
+# ─── Ollama Configuration ───
+header "Ollama"
+OLLAMA_RUNNING=false
+if ps aux | grep -i "[o]llama" | grep -v grep >/dev/null 2>&1; then
+    OLLAMA_RUNNING=true
+    ok "Ollama is running"
+fi
+
+# Check OLLAMA_HOST in shell config
+for rcfile in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
+    if [[ -f "$rcfile" ]]; then
+        OLLAMA_HOST_LINE=$(grep 'OLLAMA_HOST' "$rcfile" 2>/dev/null | grep -v '^#' || true)
+        if [[ -n "$OLLAMA_HOST_LINE" ]]; then
+            if echo "$OLLAMA_HOST_LINE" | grep -q "0.0.0.0"; then
+                issue "Ollama bound to 0.0.0.0 in $rcfile — exposes API to network"
+                if $FIX_MODE; then
+                    sed -i '' 's/OLLAMA_HOST="0\.0\.0\.0/OLLAMA_HOST="127.0.0.1/' "$rcfile" 2>/dev/null && {
+                        fixed "Changed OLLAMA_HOST to 127.0.0.1 in $rcfile"
+                        ((FIXED++))
+                    }
+                else
+                    echo -e "  ${DIM}Fix: Change to OLLAMA_HOST=\"127.0.0.1:11434\" in $rcfile${NC}"
+                fi
+            elif echo "$OLLAMA_HOST_LINE" | grep -q "127.0.0.1\|localhost"; then
+                ok "Ollama bound to localhost in $rcfile"
+            fi
+        fi
+    fi
+done
+
+# Check actual binding if running
+if $OLLAMA_RUNNING; then
+    OLLAMA_LISTEN=$(lsof -iTCP -sTCP:LISTEN -P -n 2>/dev/null | grep ollama || true)
+    if echo "$OLLAMA_LISTEN" | grep -qE '\*:|0\.0\.0\.0:'; then
+        issue "Ollama is currently listening on ALL interfaces"
+        echo -e "  ${DIM}Restart Ollama after fixing OLLAMA_HOST to apply${NC}"
+    elif [[ -n "$OLLAMA_LISTEN" ]]; then
+        ok "Ollama is listening on localhost only"
+    fi
+fi
+
+# ─── Docker ───
+header "Docker"
+if docker info >/dev/null 2>&1; then
+    info "Docker is running"
+    # Check for Open WebUI or other exposed containers
+    EXPOSED=$(docker ps --format '{{.Ports}} {{.Names}}' 2>/dev/null | grep "0.0.0.0:" || true)
+    if [[ -n "$EXPOSED" ]]; then
+        warn "Containers with ports exposed on all interfaces:"
+        echo "$EXPOSED" | sed 's/^/  /'
+        echo -e "  ${DIM}Consider binding to 127.0.0.1 instead (e.g., -p 127.0.0.1:8080:8080)${NC}"
+    fi
+else
+    # Check for orphaned daemons
+    if [[ -f "/Library/LaunchDaemons/com.docker.socket.plist" ]] || [[ -f "/Library/LaunchDaemons/com.docker.vmnetd.plist" ]]; then
+        warn "Docker LaunchDaemons found but Docker is not running"
+        if $FIX_MODE && [[ $EUID -eq 0 ]]; then
+            rm -f /Library/LaunchDaemons/com.docker.socket.plist /Library/LaunchDaemons/com.docker.vmnetd.plist 2>/dev/null && {
+                fixed "Removed orphaned Docker LaunchDaemons"
+                ((FIXED++))
+            }
+        else
+            echo -e "  ${DIM}Fix: sudo rm /Library/LaunchDaemons/com.docker.{socket,vmnetd}.plist${NC}"
+        fi
+    else
+        ok "Docker is not installed/running"
+    fi
 fi
 
 # ─── Listening Ports ───
@@ -111,13 +346,12 @@ echo ""
 if command -v lsof &>/dev/null; then
     LISTEN_OUTPUT=$(lsof -iTCP -sTCP:LISTEN -P -n 2>/dev/null || true)
     if [[ -n "$LISTEN_OUTPUT" ]]; then
-        # Check for wildcard bindings (0.0.0.0 or *)
         WILDCARD=$(echo "$LISTEN_OUTPUT" | grep -E '\*:|0\.0\.0\.0:' | grep -v "localhost" || true)
         echo "$LISTEN_OUTPUT" | head -1
         echo "$LISTEN_OUTPUT" | tail -n +2 | sort -t: -k2 -n
         echo ""
         if [[ -n "$WILDCARD" ]]; then
-            warn "The following are bound to ALL interfaces (not just localhost):"
+            warn "Bound to ALL interfaces (not just localhost):"
             echo "$WILDCARD" | awk '{printf "  %-15s %s %s\n", $1, $8, $9}'
         fi
     else
@@ -125,26 +359,56 @@ if command -v lsof &>/dev/null; then
     fi
 fi
 
-# ─── Running Agents/Bots ───
-header "Running Agents & AI Services"
-AGENT_PATTERNS="ollama|llama|openclaw|zeroclaw|picoclaw|openwebui|open-webui|telegram|bot|langchain|autogpt|openinterpreter|interpreter|comfy|stable.diffusion|whisper|vllm|llamacpp|llama.cpp|kobold|textgen|oobabooga|lmstudio"
+# ─── Running AI Processes ───
+header "Running AI Processes"
+AGENT_PATTERNS="ollama|llama|openclaw|zeroclaw|picoclaw|openwebui|open-webui|langchain|autogpt|openinterpreter|open.interpreter|comfy|stable.diffusion|whisper|vllm|llamacpp|llama.cpp|llama-server|kobold|textgen|oobabooga|lmstudio|localai|jan\.ai|msty|gpt4all|anything-llm"
 AGENT_PROCS=$(ps aux | grep -iE "$AGENT_PATTERNS" | grep -v grep || true)
 if [[ -n "$AGENT_PROCS" ]]; then
     info "Found AI/agent processes:"
-    echo "$AGENT_PROCS" | awk '{printf "  PID %-7s %-5s%% MEM  %s\n", $2, $4, $11}'
+    echo "$AGENT_PROCS" | awk '{printf "  PID %-7s %5s%% MEM  %s\n", $2, $4, $11}'
 else
     ok "No AI agent processes detected"
 fi
 
+# ─── Tailscale ───
+header "Tailscale"
+if command -v tailscale &>/dev/null || [[ -f "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]]; then
+    TS_BIN="tailscale"
+    [[ -f "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]] && TS_BIN="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+
+    TS_STATUS=$($TS_BIN status 2>/dev/null || true)
+    if [[ -n "$TS_STATUS" ]]; then
+        info "Tailscale is active"
+        TS_IP=$($TS_BIN ip -4 2>/dev/null || echo "unknown")
+        info "  Tailscale IP: $TS_IP"
+
+        # Check for tailscale serve/funnel
+        TS_SERVE=$($TS_BIN serve status 2>/dev/null || true)
+        if [[ -n "$TS_SERVE" && "$TS_SERVE" != *"No"* ]]; then
+            warn "Tailscale Serve is active — verify exposed services:"
+            echo "$TS_SERVE" | sed 's/^/  /'
+        fi
+
+        TS_FUNNEL=$($TS_BIN funnel status 2>/dev/null || true)
+        if [[ -n "$TS_FUNNEL" && "$TS_FUNNEL" != *"No"* && "$TS_FUNNEL" != *"off"* ]]; then
+            issue "Tailscale Funnel is active — services exposed to public internet"
+            echo "$TS_FUNNEL" | sed 's/^/  /'
+        fi
+    else
+        ok "Tailscale installed but not connected"
+    fi
+else
+    ok "Tailscale not installed"
+fi
+
 # ─── LaunchAgents (User) ───
-header "User LaunchAgents (~Library/LaunchAgents)"
+header "User LaunchAgents"
 LA_DIR="$HOME/Library/LaunchAgents"
 if [[ -d "$LA_DIR" ]]; then
     CUSTOM_AGENTS=0
     while IFS= read -r plist; do
         [[ -z "$plist" ]] && continue
         NAME=$(basename "$plist" .plist)
-        # Skip known Apple/system agents
         if echo "$NAME" | grep -qiE '^com\.(apple|google|microsoft|adobe|spotify)'; then
             continue
         fi
@@ -169,7 +433,7 @@ else
 fi
 
 # ─── LaunchDaemons (System) ───
-header "System LaunchDaemons (/Library/LaunchDaemons)"
+header "System LaunchDaemons"
 LD_DIR="/Library/LaunchDaemons"
 if [[ -d "$LD_DIR" ]]; then
     CUSTOM_DAEMONS=0
@@ -215,7 +479,14 @@ HOME_PERMS=$(stat -f "%Lp" "$HOME" 2>/dev/null || stat -c "%a" "$HOME" 2>/dev/nu
 if [[ "$HOME_PERMS" == "700" ]]; then
     ok "Home directory is 700 (owner-only)"
 elif [[ "$HOME_PERMS" == "750" || "$HOME_PERMS" == "755" ]]; then
-    warn "Home directory is $HOME_PERMS — consider: chmod 700 ~/"
+    warn "Home directory is $HOME_PERMS — should be 700"
+    if $FIX_MODE; then
+        chmod 700 "$HOME"
+        fixed "Home directory set to 700"
+        ((FIXED++))
+    else
+        echo -e "  ${DIM}Fix: chmod 700 ~/  ${NC}"
+    fi
 else
     info "Home directory permissions: $HOME_PERMS"
 fi
@@ -228,9 +499,13 @@ if [[ -d "$HOME/.ssh" ]]; then
         ok ".ssh directory is 700"
     else
         issue ".ssh directory is $SSH_PERMS — should be 700"
+        if $FIX_MODE; then
+            chmod 700 "$HOME/.ssh"
+            fixed ".ssh directory set to 700"
+            ((FIXED++))
+        fi
     fi
 
-    # Check for authorized_keys
     if [[ -f "$HOME/.ssh/authorized_keys" ]]; then
         KEY_COUNT=$(grep -c "^ssh-" "$HOME/.ssh/authorized_keys" 2>/dev/null || echo "0")
         warn "authorized_keys has $KEY_COUNT key(s) — verify these are yours"
@@ -238,19 +513,23 @@ if [[ -d "$HOME/.ssh" ]]; then
         ok "No authorized_keys file"
     fi
 
-    # Check key files permissions
     while IFS= read -r keyfile; do
         [[ -z "$keyfile" ]] && continue
         KPERMS=$(stat -f "%Lp" "$keyfile" 2>/dev/null)
         if [[ "$KPERMS" != "600" && "$KPERMS" != "400" ]]; then
             issue "$(basename "$keyfile") has permissions $KPERMS — should be 600"
+            if $FIX_MODE; then
+                chmod 600 "$keyfile"
+                fixed "$(basename "$keyfile") set to 600"
+                ((FIXED++))
+            fi
         fi
     done < <(find "$HOME/.ssh" -name "id_*" ! -name "*.pub" 2>/dev/null)
 else
     ok "No .ssh directory"
 fi
 
-# ─── Sensitive Files in Home ───
+# ─── Sensitive Files ───
 header "Sensitive Files Check"
 SENSITIVE_PATTERNS=(".env" ".env.local" ".env.production" "credentials.json" "service-account*.json" ".netrc" ".npmrc")
 for pat in "${SENSITIVE_PATTERNS[@]}"; do
@@ -274,22 +553,40 @@ fi
 header "Power Management"
 SLEEP_VAL=$(pmset -g | grep '^ sleep' | awk '{print $2}' 2>/dev/null || echo "unknown")
 DISPLAY_SLEEP=$(pmset -g | grep '^ displaysleep' | awk '{print $2}' 2>/dev/null || echo "unknown")
+AUTORESTART=$(pmset -g | grep '^ autorestart' | awk '{print $2}' 2>/dev/null || echo "unknown")
+
 if [[ "$SLEEP_VAL" == "0" ]]; then
-    warn "System sleep is disabled (machine never sleeps)"
+    ok "System sleep disabled (expected for always-on server)"
 else
-    ok "System sleep: $SLEEP_VAL minutes"
+    warn "System sleep: $SLEEP_VAL min — consider disabling for always-on AI workstation"
+    echo -e "  ${DIM}Fix: sudo pmset -a sleep 0${NC}"
 fi
-if [[ "$DISPLAY_SLEEP" == "0" ]]; then
-    warn "Display sleep is disabled"
+
+if [[ "$AUTORESTART" == "1" ]]; then
+    ok "Auto-restart on power failure is enabled"
 else
-    ok "Display sleep: $DISPLAY_SLEEP minutes"
+    warn "Auto-restart on power failure is disabled"
+    if $FIX_MODE && [[ $EUID -eq 0 ]]; then
+        pmset -a autorestart 1 2>/dev/null
+        fixed "Auto-restart enabled"
+        ((FIXED++))
+    else
+        echo -e "  ${DIM}Fix: sudo pmset -a autorestart 1${NC}"
+    fi
 fi
 
 # ─── Summary ───
 header "Audit Complete"
+echo ""
 if [[ $ISSUES -eq 0 ]]; then
-    echo -e "${GREEN}${BOLD}No critical issues found.${NC}"
+    echo -e "  ${GREEN}${BOLD}No critical issues found.${NC}"
 else
-    echo -e "${RED}${BOLD}Found $ISSUES critical issue(s) that should be addressed.${NC}"
+    echo -e "  ${RED}${BOLD}Found $ISSUES critical issue(s) that should be addressed.${NC}"
+fi
+if $FIX_MODE && [[ $FIXED -gt 0 ]]; then
+    echo -e "  ${GREEN}${BOLD}Auto-fixed $FIXED issue(s).${NC}"
+fi
+if ! $FIX_MODE && [[ $ISSUES -gt 0 ]]; then
+    echo -e "  ${DIM}Run with --fix to auto-fix applicable issues.${NC}"
 fi
 echo ""

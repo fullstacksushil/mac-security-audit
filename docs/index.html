@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>mac-security-audit</title>
+    <meta name="description" content="One-command security audit for macOS AI workstations">
+    <style>
+        body {
+            font-family: Verdana, Geneva, sans-serif;
+            font-size: 13px;
+            background: #fff;
+            color: #333;
+            max-width: 700px;
+            margin: 20px auto;
+            padding: 0 15px;
+            line-height: 1.6;
+        }
+        h1 { font-size: 22px; border-bottom: 2px solid #333; padding-bottom: 5px; }
+        h2 { font-size: 16px; color: #555; border-bottom: 1px solid #ccc; padding-bottom: 3px; margin-top: 25px; }
+        a { color: #0366d6; }
+        a:visited { color: #551a8b; }
+        code {
+            background: #f4f4f4;
+            border: 1px solid #ddd;
+            padding: 1px 4px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+        pre {
+            background: #f4f4f4;
+            border: 1px solid #ddd;
+            padding: 10px;
+            overflow-x: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            line-height: 1.5;
+        }
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 10px 0;
+        }
+        th, td {
+            border: 1px solid #ccc;
+            padding: 4px 8px;
+            text-align: left;
+            font-size: 12px;
+        }
+        th { background: #eee; }
+        tr:nth-child(even) { background: #f9f9f9; }
+        .green { color: green; }
+        .red { color: red; }
+        .orange { color: #cc7700; }
+        hr { border: none; border-top: 1px solid #ccc; margin: 20px 0; }
+        .footer { color: #999; font-size: 11px; margin-top: 30px; text-align: center; }
+    </style>
+</head>
+<body>
+
+<h1>mac-security-audit</h1>
+
+<p><b>Security audit for macOS machines running local AI.</b><br>
+One command. Zero dependencies. Works on any Mac.</p>
+
+<p>
+<img src="https://img.shields.io/github/stars/fullstacksushil/mac-security-audit?style=social" alt="stars">
+<img src="https://img.shields.io/badge/platform-macOS-lightgrey" alt="macOS">
+<img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT">
+</p>
+
+<h2>Install</h2>
+
+<p><b>Audit only:</b></p>
+<pre>curl -fsSL https://raw.githubusercontent.com/fullstacksushil/mac-security-audit/main/mac-security-audit.sh | bash</pre>
+
+<p><b>Full audit + auto-fix (recommended):</b></p>
+<pre>curl -fsSL https://raw.githubusercontent.com/fullstacksushil/mac-security-audit/main/mac-security-audit.sh | sudo bash -s -- --fix</pre>
+
+<h2>Why</h2>
+
+<p>Mac Minis are the new home server for local AI. Most setups have problems:</p>
+<ul>
+    <li>Ollama bound to <code>0.0.0.0</code> &mdash; your models are on the network</li>
+    <li>AI agent gateways with weak auth tokens</li>
+    <li>Docker containers exposed on all interfaces</li>
+    <li>Tailscale Funnel publishing services to the internet</li>
+    <li>Orphaned agent configs with API keys on disk</li>
+    <li>Firewall off, FileVault off, Remote Desktop on</li>
+</ul>
+
+<h2>What it checks</h2>
+
+<table>
+<tr><th>Check</th><th>Details</th><th>Auto-fix?</th></tr>
+<tr><td>Firewall</td><td>Global state + stealth mode</td><td class="green">Yes</td></tr>
+<tr><td>FileVault</td><td>Disk encryption</td><td class="orange">Manual</td></tr>
+<tr><td>SIP</td><td>System Integrity Protection</td><td class="orange">Manual</td></tr>
+<tr><td>Gatekeeper</td><td>App verification</td><td class="green">Yes</td></tr>
+<tr><td>SSH / ARD / Screen Sharing</td><td>Remote access services</td><td class="green">Yes</td></tr>
+<tr><td>Ollama</td><td>Binding check (flags 0.0.0.0)</td><td class="green">Yes</td></tr>
+<tr><td>OpenClaw</td><td>Auth tokens, binding, plugins</td><td class="orange">Manual</td></tr>
+<tr><td>Docker</td><td>Exposed containers + orphaned daemons</td><td class="green">Yes</td></tr>
+<tr><td>Tailscale</td><td>Serve/Funnel exposure</td><td class="orange">Manual</td></tr>
+<tr><td>Listening ports</td><td>All TCP, flags wildcard bindings</td><td>&mdash;</td></tr>
+<tr><td>AI processes</td><td>Ollama, LLaMA, LM Studio, ComfyUI, etc.</td><td>&mdash;</td></tr>
+<tr><td>LaunchAgents/Daemons</td><td>Custom agents (filters Apple/vendors)</td><td>&mdash;</td></tr>
+<tr><td>Cron jobs + Login items</td><td>Scheduled jobs and startup apps</td><td>&mdash;</td></tr>
+<tr><td>Home dir + SSH keys</td><td>Permission checks</td><td class="green">Yes</td></tr>
+<tr><td>Sensitive files</td><td>.env, credentials.json, .netrc</td><td>&mdash;</td></tr>
+<tr><td>Orphaned agents</td><td>Leftover secrets from unused agents</td><td class="orange">Manual</td></tr>
+<tr><td>Auto-restart</td><td>Restart on power failure</td><td class="green">Yes</td></tr>
+</table>
+
+<h2>Sample output</h2>
+
+<pre><span class="green">[ OK ]</span> Firewall is enabled
+<span class="orange">[WARN]</span> Stealth mode is disabled
+<span class="green">[FIXED]</span> Stealth mode enabled
+
+<span class="red">[ALERT]</span> Ollama bound to 0.0.0.0 — exposes API to network
+<span class="green">[FIXED]</span> Changed OLLAMA_HOST to 127.0.0.1
+
+<span class="red">[ALERT]</span> OpenClaw gateway token is weak (6 chars)
+
+<span class="green">[ OK ]</span> Remote Login (SSH) is disabled
+<span class="green">[ OK ]</span> FileVault is ON
+<span class="green">[ OK ]</span> SIP is enabled
+
+Found 2 critical issue(s) that should be addressed.
+Auto-fixed 2 issue(s).</pre>
+
+<h2>Requirements</h2>
+
+<ul>
+    <li>macOS 12+ (Monterey or later)</li>
+    <li>Bash 3.2+ (ships with macOS)</li>
+    <li>No dependencies</li>
+</ul>
+
+<h2>Links</h2>
+
+<ul>
+    <li><a href="https://github.com/fullstacksushil/mac-security-audit">GitHub repo</a></li>
+    <li><a href="https://github.com/fullstacksushil/mac-security-audit/issues">Report a bug / request a check</a></li>
+    <li><a href="https://github.com/fullstacksushil/mac-security-audit/releases">Releases</a></li>
+</ul>
+
+<hr>
+
+<p class="footer">
+    MIT License &mdash; <a href="https://github.com/fullstacksushil">fullstacksushil</a> &mdash; 2026
+</p>
+
+</body>
+</html>
